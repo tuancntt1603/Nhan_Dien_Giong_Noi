@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <title>Nhận diện giọng nói</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
+        h1 { color: #333; }
+        #status { font-size: 24px; color: blue; margin: 20px 0; }
+        #transcript {
+            margin-top: 20px;
+            font-size: 18px;
+            text-align: left;
+            width: 80%;
+            margin: auto;
+            min-height: 150px;
+            border: 1px solid #ccc;
+            padding: 10px;
+            background: #f9f9f9;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            margin: 10px;
+            cursor: pointer;
+        }
+        button:disabled {
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+        #speaker {
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Nhận diện giọng nói</h1>
+    <button id="startMeeting">Bắt đầu cuộc họp</button>
+    <button id="endMeeting">Kết thúc cuộc họp</button>
+    <div id="status">Trạng thái: Sẵn sàng</div>
+    <div id="speaker">Người nói: Chưa xác định</div>
+    <div id="transcript">Kết quả hội thảo:</div>
+
+    <script>
+        const socket = io('http://localhost:5000');
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        
+        if (!SpeechRecognition) {
+            alert("Trình duyệt không hỗ trợ nhận diện giọng nói!");
+        } else {
+            const recognition = new SpeechRecognition();
+            recognition.lang = 'vi-VN';
+            recognition.interimResults = true;
+            recognition.continuous = true;
+
+            const startMeetingButton = document.getElementById('startMeeting');
+            const endMeetingButton = document.getElementById('endMeeting');
+            const statusDiv = document.getElementById('status');
+            const speakerDiv = document.getElementById('speaker');
+            const transcriptDiv = document.getElementById('transcript');
+
+            let currentTranscript = "";
+            let meetingLog = [];       // Lưu toàn bộ lịch sử hội thoại
+            let currentSpeaker = null;
+            let isMeetingActive = false;
+
+            // Lắng nghe phản hồi từ server khi có thay đổi
+            socket.on('transcript_update', (data) => {
+                if (data.message) {
+                    // Thêm nội dung mới vào meetingLog
+                    meetingLog.push(data.message);
+                    // Hiển thị toàn bộ meetingLog
+                    transcriptDiv.innerHTML = "Kết quả hội thảo:<br>" + meetingLog.join("<br>");
+                }
+            });
+
+            // Lắng nghe sự kiện "speaker_result" nếu server trả về kết quả nhận diện người nói (tuỳ nhu cầu)
+            socket.on('speaker_result', (data) => {
+                currentSpeaker = data.speaker;
+                speakerDiv.innerText = `Người nói: ${currentSpeaker}`;
+            });
+
+            recognition.onresult = (event) => {
+                let transcriptText = '';
+                for (let i = event.resultIndex; i < event.results.length; i++) {
+                    transcriptText += event.results[i][0].transcript + ' ';
+                }
+                transcriptText = transcriptText.trim();
+                console.log("Transcript nhận được: ", transcriptText);
+
+                if (isMeetingActive) {
+                    // Từ khoá "kết thúc cuộc gọi"
+                    if (transcriptText.toLowerCase().includes("kết thúc cuộc gọi")) {
+                        // Nếu đang có người nói, lưu nội dung cuối cùng
+                        if (currentSpeaker && currentTranscript) {
+                            meetingLog.push(`${currentSpeaker}: ${currentTranscript}`);
+                        }
+                        // Cập nhật hiển thị
+                        transcriptDiv.innerHTML = "Kết quả hội thảo:<br>" + meetingLog.join("<br>");
+                        // Gửi yêu cầu lưu transcript
+                        socket.emit('save_transcript', { transcript: meetingLog });
+                        // Dừng nhận dạng
+                        recognition.stop();
+                        isMeetingActive = false;
+                        currentSpeaker = null;
+                        currentTranscript = "";
+                        statusDiv.innerText = "Trạng thái: Cuộc họp đã kết thúc. Transcript đã được lưu.";
+                        speakerDiv.innerText = "Người nói: Chưa xác định";
+                    }
+                    // Từ khoá "kết thúc" (kết thúc phiên người nói hiện tại)
+                    else if (transcriptText.toLowerCase().includes("kết thúc") && currentSpeaker) {
+                        // Lưu nội dung vừa nói
+                        if (currentTranscript) {
+                            meetingLog.push(`${currentSpeaker}: ${currentTranscript}`);
+                        }
+                        currentTranscript = "";
+                        statusDiv.innerText = "Trạng thái: Kết thúc lời nói. Mời người tiếp theo nói 'bắt đầu'.";
+                        speakerDiv.innerText = "Người nói: Chưa xác định";
+                        currentSpeaker = null;
+                        // Cập nhật hiển thị
+                        transcriptDiv.innerHTML = "Kết quả hội thảo:<br>" + meetingLog.join("<br>");
+                    }
+                    // Từ khoá "bắt đầu" khi chưa có người nói
+                    else if (!currentSpeaker && transcriptText.toLowerCase().includes("bắt đầu")) {
+                        statusDiv.innerText = "Trạng thái: Đang nhận diện người nói...";
+                        // Ở đây server sẽ nhận audio_data, identify_speaker, v.v.
+                        // Phía client ta chưa gửi audio do code cũ dùng Web Speech API, 
+                        // server "audio_data" code kia dùng MediaRecorder.
+                    }
+                    // Nếu đã có currentSpeaker, ghi lại nội dung
+                    else if (currentSpeaker) {
+                        currentTranscript = transcriptText;
+                        // Cập nhật hiển thị tạm thời
+                        transcriptDiv.innerHTML = "Kết quả hội thảo:<br>" 
+                            + meetingLog.join("<br>") 
+                            + "<br>" + `${currentSpeaker}: ${currentTranscript}`;
+                    } 
+                    // Nếu chưa có currentSpeaker
+                    else {
+                        transcriptDiv.innerHTML = "Kết quả hội thảo:<br>"
+                            + meetingLog.join("<br>")
+                            + "<br>Chưa có người nói: " + transcriptText;
+                    }
+                }
+            };
+
+            recognition.onstart = () => {
+                if (isMeetingActive) {
+                    statusDiv.innerText = "Trạng thái: Cuộc họp đang diễn ra";
+                } else {
+                    statusDiv.innerText = "Trạng thái: Sẵn sàng (Nhấn 'Bắt đầu cuộc họp')";
+                }
+            };
+
+            recognition.onend = () => {
+                statusDiv.innerText = "Trạng thái: Đã dừng";
+                startMeetingButton.disabled = false;
+                endMeetingButton.disabled = true;
+                isMeetingActive = false;
+                currentSpeaker = null;
+                currentTranscript = "";
+                speakerDiv.innerText = "Người nói: Chưa xác định";
+            };
+
+            recognition.onerror = (event) => {
+                statusDiv.innerText = `Trạng thái: Lỗi - ${event.error}`;
+                console.error("Lỗi SpeechRecognition: ", event.error);
+                startMeetingButton.disabled = false;
+                endMeetingButton.disabled = true;
+            };
+
+            startMeetingButton.addEventListener('click', () => {
+                isMeetingActive = true;
+                recognition.start();
+                startMeetingButton.disabled = true;
+                endMeetingButton.disabled = false;
+                statusDiv.innerText = "Trạng thái: Cuộc họp đang diễn ra";
+            });
+
+            endMeetingButton.addEventListener('click', () => {
+                // Kết thúc cuộc họp bằng nút bấm
+                if (currentSpeaker && currentTranscript) {
+                    meetingLog.push(`${currentSpeaker}: ${currentTranscript}`);
+                }
+                transcriptDiv.innerHTML = "Kết quả hội thảo:<br>" + meetingLog.join("<br>");
+                socket.emit('save_transcript', { transcript: meetingLog });
+                recognition.stop();
+                statusDiv.innerText = "Trạng thái: Cuộc họp đã kết thúc. Transcript đã được lưu.";
+            });
+        }
+    </script>
+</body>
+</html>
