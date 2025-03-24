@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nhận diện người nói</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            text-align: center; 
+            margin: 20px; 
+            background-color: #f0f0f0;
+        }
+        #status { 
+            font-size: 20px; 
+            font-weight: bold; 
+            margin: 10px; 
+            color: #333;
+        }
+        #speaker { 
+            font-size: 18px; 
+            margin: 10px; 
+            color: #007bff;
+        }
+        #invitation { 
+            font-size: 16px; 
+            color: #28a745; 
+            margin: 10px;
+        }
+        #transcript {
+            border: 1px solid #ccc;
+            padding: 15px;
+            width: 80%;
+            margin: 20px auto;
+            height: 250px;
+            overflow-y: auto;
+            text-align: left;
+            background-color: #fff;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            border-radius: 8px;
+        }
+        #transcript-list {
+            list-style-type: none;
+            padding: 0;
+        }
+        #transcript-list li {
+            margin: 8px 0;
+            padding: 12px;
+            background-color: #f9f9f9;
+            border-radius: 5px;
+            opacity: 0;
+            transform: translateY(-10px);
+            transition: opacity 0.3s ease, transform 0.3s ease;
+        }
+        #transcript-list li.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        #transcript-list i {
+            color: #666;
+            font-size: 0.9em;
+        }
+        button { 
+            padding: 10px 20px; 
+            font-size: 16px; 
+            margin: 10px; 
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.2s ease;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+    </style>
+</head>
+<body>
+    <button onclick="startMeeting()" id="startMeetingButton">Bắt đầu cuộc họp</button>
+    <button onclick="endMeeting()" id="endMeetingButton" style="display:none;">Kết thúc cuộc họp</button>
+    <p id="status">Trạng thái: Chưa bắt đầu</p>
+    <p id="speaker">Người nói: Chưa có dữ liệu</p>
+    <p id="invitation"></p>
+    <div id="transcript">
+        <h3>Lịch sử hội thảo:</h3>
+        <ul id="transcript-list"></ul>
+    </div>
+
+    <script>
+     const socket = io();
+        let mediaRecorder;
+        let audioChunks = [];
+        let recognition;
+        let isRecording = false;
+        let identifiedSpeaker = null;
+        let recordingInterval;
+        let currentTranscript = '';
+        let currentSpeaker = null;
+        let entryId = 0;
+        let processedEnds = 0;
+
+        function startMeeting() {
+            document.getElementById('status').innerText = "Trạng thái: Đang nhận diện";
+            document.getElementById('startMeetingButton').style.display = 'none';
+            document.getElementById('endMeetingButton').style.display = 'inline';
+            navigator.mediaDevices.getUserMedia({ audio: true })
+                .then(stream => {
+                    mediaRecorder = new MediaRecorder(stream);
+                    mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data);
+                    mediaRecorder.onstop = sendAudio;
+                    audioChunks = [];
+                    mediaRecorder.start(1000); // Ghi âm mỗi 1 giây
+                    isRecording = true;
+
+                    recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+                    recognition.lang = 'vi-VN';
+                    recognition.continuous = true;
+                    recognition.interimResults = true;
+
+                    recognition.onresult = (event) => {
+                        let finalTranscript = '';
+                        let interimTranscript = '';
+                        for (let i = event.resultIndex; i < event.results.length; i++) {
+                            if (event.results[i].isFinal) {
+                                finalTranscript += event.results[i][0].transcript;
+                            } else {
+                                interimTranscript += event.results[i][0].transcript;
+                            }
+                        }
+
+                        if (identifiedSpeaker) {
+                            let parts = finalTranscript.split(/(kết thúc)/i);
+                            let num_ends = Math.floor(parts.length / 2);
+                            for (let i = processedEnds; i < num_ends; i++) {
+                                let part = parts[2 * i].trim();
+                                if (part) {
+                                    finalizeTranscript(currentSpeaker, part);
+                                }
+                            }
+                            processedEnds = num_ends;
+                            if (parts.length % 2 === 1) {
+                                currentTranscript = parts[parts.length - 1].trim();
+                            } else {
+                                currentTranscript = '';
+                            }
+
+                            if (currentTranscript || interimTranscript) {
+                                updateTranscript(currentSpeaker, currentTranscript + interimTranscript);
+                            }
+
+                            if (finalTranscript.toLowerCase().includes("kết thúc cuộc họp")) {
+                                socket.emit('save_history');
+                                stopMeeting();
+                            }
+                        } else {
+                            document.getElementById('invitation').innerText = "Mời người tiếp theo phát biểu";
+                        }
+                    };
+
+                    recognition.start();
+
+                    recordingInterval = setInterval(() => {
+                        if (isRecording) {
+                            mediaRecorder.stop();
+                            mediaRecorder.start(1000); // Khớp với timeslice
+                            audioChunks = [];
+                        }
+                    }, 1000); // Giảm từ 5000ms xuống 1000ms
+                })
+                .catch(err => {
+                    console.error("Lỗi khi truy cập micro: ", err);
+                    document.getElementById('status').innerText = "Trạng thái: Lỗi truy cập micro";
+                });
+        }
+
+        function endMeeting() {
+            if (isRecording) {
+                mediaRecorder.stop();
+                recognition.stop();
+                clearInterval(recordingInterval);
+                isRecording = false;
+                document.getElementById('status').innerText = "Trạng thái: Kết thúc";
+                document.getElementById('endMeetingButton').style.display = 'none';
+                document.getElementById('startMeetingButton').style.display = 'inline';
+                document.getElementById('invitation').innerText = "";
+                identifiedSpeaker = null;
+                currentSpeaker = null;
+                socket.emit('save_history');
+            }
+        }
+
+        function stopMeeting() {
+            if (isRecording) {
+                mediaRecorder.stop();
+                recognition.stop();
+                clearInterval(recordingInterval);
+                isRecording = false;
+                document.getElementById('status').innerText = "Trạng thái: Kết thúc";
+                document.getElementById('endMeetingButton').style.display = 'none';
+                document.getElementById('startMeetingButton').style.display = 'inline';
+                document.getElementById('invitation').innerText = "";
+                identifiedSpeaker = null;
+                currentSpeaker = null;
+            }
+        }
+
+        function sendAudio() {
+            const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+            socket.emit('audio_data', audioBlob);
+        }
+
+        function updateTranscript(speaker, transcript) {
+            requestAnimationFrame(() => {
+                const transcriptList = document.getElementById('transcript-list');
+                let currentEntry = document.getElementById(`entry-${entryId}`);
+
+                if (!currentEntry) {
+                    currentEntry = document.createElement('li');
+                    currentEntry.id = `entry-${entryId}`;
+                    currentEntry.innerHTML = `<b>${speaker}:</b> <span>${transcript}</span>`;
+                    transcriptList.appendChild(currentEntry);
+                    setTimeout(() => currentEntry.classList.add('visible'), 10);
+                } else {
+                    currentEntry.querySelector('span').innerText = transcript;
+                }
+
+                transcriptList.scrollTop = transcriptList.scrollHeight;
+            });
+        }
+
+        function finalizeTranscript(speaker, transcript) {
+            const transcriptList = document.getElementById('transcript-list');
+            let currentEntry = document.getElementById(`entry-${entryId}`);
+
+            if (currentEntry && transcript) {
+                currentEntry.innerHTML = `<b>${speaker}:</b> ${transcript} <i>(Kết thúc)</i>`;
+                currentEntry.removeAttribute('id');
+                entryId++;
+            }
+
+            socket.emit('add_to_history', { speaker: speaker, transcript: transcript });
+            transcriptList.scrollTop = transcriptList.scrollHeight;
+
+            identifiedSpeaker = null;
+            currentSpeaker = null;
+            document.getElementById('speaker').innerText = "Người nói: Chưa có dữ liệu";
+            document.getElementById('invitation').innerText = "Mời người tiếp theo phát biểu";
+        }
+
+        socket.on('speaker_result', (data) => {
+            if (data.speaker && !identifiedSpeaker) {
+                identifiedSpeaker = data.speaker;
+                currentSpeaker = identifiedSpeaker;
+                document.getElementById('speaker').innerText = `Người nói: ${identifiedSpeaker}`;
+                document.getElementById('invitation').innerText = `Đã nhận dạng được ${identifiedSpeaker}, mời phát biểu`;
+            } else if (data.message) {
+                document.getElementById('status').innerText = `Trạng thái: ${data.message}`;
+            }
+        });
+
+        socket.on('download_history', (data) => {
+            const link = document.createElement('a');
+            link.href = '/download/' + data.file;
+            link.download = 'conversation_history.txt';
+            link.click();
+        });
+    </script>
+</body>
+</html>
